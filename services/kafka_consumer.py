@@ -39,7 +39,6 @@ class KafkaConsumerService:
             settings.topic,  # Топик для подписки
             group_id=settings.kafka.group_id,  # Group ID
             auto_offset_reset='earliest',  # Auto Offset Reset = earliest
-            enable_auto_commit=True,  # Commit Offsets = true
             auto_commit_interval_ms=1000,  # Max Uncommitted Time = 1 sec
         )
         async def handle_message(message: Dict[str, Any]):
