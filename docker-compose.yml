@@ -1,0 +1,20 @@
+services:
+  ok-users-kafka-to-elastic:
+    container_name: ok-users-kafka-to-elastic
+    build: .
+    volumes:
+      - .:/app  # монтируем текущую директорию в контейнер
+    environment:
+      SERVICE_NAME: ok-users-kafka-to-elastic
+      TZ: Europe/Moscow
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks:
+      - my_network
+    restart: unless-stopped
+
+networks:
+  my_network:
+    external: true
