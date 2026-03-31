@@ -18,32 +18,18 @@ logger = logging.getLogger(__name__)
 
 
 class KafkaToElasticPipeline:
-    '''
-    Основной пайплайн обработки данных из Kafka в Elasticsearch
-    Объединяет все компоненты в единый поток обработки
-    '''
+    '''Основной пайплайн обработки данных из Kafka в Elasticsearch'''
 
     def __init__(self):
-        # Инициализация процессора с настраиваемыми параметрами
-        # параметры нужно вынести в settings.py !!!
-        self.record_processor = RecordProcessor(
-            fields_to_format=['last_online', 'registered_date'],  # Список полей для форматирования дат
-            add_timestamp=True,  # Добавлять ли ts
-            birthday_field='birthday',  # Поле для разбиения (None - отключить)
-            truncate_fields={'inspired_by': 256},  # Обрезание строк {поле: макс_длина}
-            avatar_hash_field='avatar_phash',  # Поле для копирования хэша аватара
-        )
+        self.record_processor = RecordProcessor()
         self.elastic_service = None
         self.record_merger = None
         self.kafka_service = None
         self.running = False
         self.flush_task = None
-        self.stop_event = asyncio.Event()
-
-        # Статистика
-        self.start_time = None
-        self.last_stats_time = None
         self.stats_task = None
+        self.stop_event = asyncio.Event()
+        self.start_time = None
 
     async def _init_elasticsearch_with_retry(self, max_retries: int = 10, delay: int = 5):
         '''Инициализация ES с повторными попытками'''
@@ -72,7 +58,9 @@ class KafkaToElasticPipeline:
             return
 
         try:
-            # Обрабатываем массив или одиночную запись
+            uid = message.get('uid') if isinstance(message, dict) else None
+            logger.debug(f'Received message: uid={uid}')
+
             if isinstance(message, list):
                 logger.info(f'Received batch of {len(message)} records from Kafka')
                 for record in message:
@@ -125,7 +113,7 @@ class KafkaToElasticPipeline:
         '''Периодическая отправка готовых батчей'''
         while self.running:
             try:
-                await asyncio.sleep(1)  # Проверяем каждую секунду
+                await asyncio.sleep(1)
 
                 if self.record_merger:
                     ready_batches = await self.record_merger.get_ready_batches()
@@ -143,13 +131,13 @@ class KafkaToElasticPipeline:
         '''Периодическое логирование статистики'''
         while self.running:
             try:
-                await asyncio.sleep(30)  # Логируем каждые 30 секунд
+                await asyncio.sleep(30)
 
                 if self.record_processor and self.record_merger:
                     processor_stats = self.record_processor.get_stats()
                     merger_stats = self.record_merger.get_stats()
 
-                    logger.info("=== PIPELINE STATISTICS ===")
+                    logger.info('=== PIPELINE STATISTICS ===')
                     logger.info(
                         f"Processor: {processor_stats['processed_count']} processed, "
                         f"{processor_stats['error_count']} errors, "
@@ -167,7 +155,7 @@ class KafkaToElasticPipeline:
                         f"Batches by reason: size={merger_stats['batches_by_reason']['size']}, "
                         f"timeout={merger_stats['batches_by_reason']['timeout']}"
                     )
-                    logger.info("============================")
+                    logger.info('============================')
 
             except asyncio.CancelledError:
                 break
@@ -177,44 +165,34 @@ class KafkaToElasticPipeline:
     async def start(self):
         '''Запускает пайплайн'''
         self.start_time = time.time()
-        self.last_stats_time = self.start_time
 
-        # Подключаемся к Elasticsearch
         if not await self._init_elasticsearch_with_retry():
             logger.error('Cannot connect to Elasticsearch. Exiting...')
             sys.exit(1)
 
-        # Инициализируем мерджер
-        self.record_merger = RecordMerger(
-            min_records=settings.elasticsearch.min_records,
-            max_records=settings.elasticsearch.max_records,
-            max_bin_age=settings.elasticsearch.max_bin_age,
-            max_bins=settings.max_bins,
-        )
+        # Используем настройки из merger
+        self.record_merger = RecordMerger()
 
         self.running = True
 
-        # Запускаем фоновые задачи
         self.flush_task = asyncio.create_task(self._flush_ready_batches())
         self.stats_task = asyncio.create_task(self._log_stats_periodically())
 
-        # Запускаем Kafka консьюмер
         self.kafka_service = KafkaConsumerService(self.handle_message)
 
-        logger.info("=" * 50)
-        logger.info("Pipeline started successfully")
-        logger.info("Configuration:")
-        logger.info(f"  - Kafka topic: {settings.topic}")
-        logger.info(f"  - Kafka group_id: {settings.kafka.group_id}")
-        logger.info(f"  - Elasticsearch hosts: {settings.elasticsearch.hosts}")
-        logger.info(f"  - Elasticsearch index: {settings.elasticsearch.index}")
-        logger.info(f"  - Batch size: {settings.elasticsearch.max_records} records")
-        logger.info(f"  - Max bin age: {settings.elasticsearch.max_bin_age} seconds")
-        logger.info("=" * 50)
+        logger.info('=' * 50)
+        logger.info('Pipeline started successfully')
+        logger.info('Configuration:')
+        logger.info(f'  - Kafka topic: {settings.topic}')
+        logger.info(f'  - Kafka group_id: {settings.kafka.group_id}')
+        logger.info(f'  - Elasticsearch hosts: {settings.elasticsearch.hosts}')
+        logger.info(f'  - Elasticsearch index: {settings.elasticsearch.index}')
+        logger.info(f'  - Batch size: {settings.merger.max_records} records')
+        logger.info(f'  - Max bin age: {settings.merger.max_bin_age} seconds')
+        logger.info('=' * 50)
 
         try:
             await self.kafka_service.start()
-            # Ждем сигнала остановки
             await self.stop_event.wait()
         except asyncio.CancelledError:
             logger.info('Shutting down...')
@@ -229,18 +207,16 @@ class KafkaToElasticPipeline:
         logger.info('Stopping pipeline...')
         self.running = False
 
-        # Логируем финальную статистику
         if self.record_processor and self.record_merger:
             processor_stats = self.record_processor.get_stats()
             merger_stats = self.record_merger.get_stats()
-            logger.info("=== FINAL STATISTICS ===")
+            logger.info('=== FINAL STATISTICS ===')
             logger.info(f"Total processed: {processor_stats['processed_count']} records")
             logger.info(f"Total errors: {processor_stats['error_count']}")
             logger.info(f"Total batches: {merger_stats['total_batches_created']}")
             logger.info(f"Uptime: {processor_stats['uptime_seconds']:.2f} seconds")
-            logger.info("========================")
+            logger.info('========================')
 
-        # Останавливаем фоновые задачи
         for task in [self.flush_task, self.stats_task]:
             if task:
                 task.cancel()
@@ -249,18 +225,16 @@ class KafkaToElasticPipeline:
                 except asyncio.CancelledError:
                     pass
 
-        # Отправляем оставшиеся записи
         if self.record_merger:
             try:
                 remaining_batches = await self.record_merger.get_ready_batches()
                 if remaining_batches:
-                    logger.info(f"Flushing {len(remaining_batches)} remaining batches")
+                    logger.info(f'Flushing {len(remaining_batches)} remaining batches')
                     for batch in remaining_batches:
                         await self._send_to_elasticsearch(batch)
             except Exception as e:
                 logger.error(f'Error flushing remaining batches: {e}')
 
-        # Останавливаем консьюмер
         if self.kafka_service:
             await self.kafka_service.stop()
 
@@ -271,7 +245,6 @@ async def main():
     '''Точка входа в приложение'''
     pipeline = KafkaToElasticPipeline()
 
-    # Настройка graceful shutdown
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(pipeline.stop()))

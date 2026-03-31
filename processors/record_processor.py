@@ -1,8 +1,9 @@
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from importlib import import_module
+from typing import Any, Optional
 
-from config.schemas import OKUsers
+from config.settings import settings
 
 from .date_processor import RecordEnricher
 
@@ -12,95 +13,70 @@ logger = logging.getLogger(__name__)
 class RecordProcessor:
     '''Основной процессор записей (объединяет все трансформации)'''
 
-    def __init__(
-        self,
-        fields_to_format: Optional[List[str]] = None,
-        add_timestamp: bool = True,
-        birthday_field: Optional[str] = 'birthday',
-        truncate_fields: Optional[dict[str, int]] = None,
-        avatar_hash_field: Optional[str] = None,
-    ):
-        """
-        Инициализация процессора с настраиваемыми параметрами
-
-        Args:
-            fields_to_format: Список полей для форматирования дат
-            add_timestamp: Добавлять ли поле ts
-            birthday_field: Название поля для разбиения даты рождения
-            truncate_fields: Словарь {поле: максимальная_длина} для обрезания строк
-            avatar_hash_field: Название поля для копирования хэша аватара
-        """
-        self.enricher = RecordEnricher(
-            fields_to_format=fields_to_format,
-            add_timestamp=add_timestamp,
-            birthday_field=birthday_field,
-            truncate_fields=truncate_fields,
-            avatar_hash_field=avatar_hash_field,
-        )
+    def __init__(self):
+        # Загружаем схему динамически
+        self.schema_class = self._load_schema(settings.record_processor.schema_class)
+        self.enricher = RecordEnricher(settings.record_processor)
         self.processed_count = 0
         self.error_count = 0
         self.start_time = time.time()
-        logger.info("RecordProcessor initialized")
+        logger.info('RecordProcessor initialized')
+
+    def _load_schema(self, schema_path: str):
+        '''Динамически загружает класс схемы'''
+        try:
+            module_path, class_name = schema_path.rsplit('.', 1)
+            module = import_module(module_path)
+            schema_class = getattr(module, class_name)
+            logger.info(f'Loaded schema: {schema_path}')
+            return schema_class
+        except Exception as e:
+            logger.error(f'Failed to load schema {schema_path}: {e}')
+            raise
 
     def process_record(self, record: dict[str, Any]) -> Optional[dict[str, Any]]:
-        '''
-        Полная обработка одной записи
-        Включает:
-        1. Валидацию по схеме
-        2. Добавление timestamp
-        3. Форматирование дат
-        4. Разбиение др
-        5. Обрезание строк
-        6. Копирование хэша аватара
-        '''
+        '''Полная обработка одной записи'''
         try:
             # Валидируем запись по схеме
-            user = OKUsers(**record)
+            user = self.schema_class(**record)
             record_dict = user.model_dump()
             logger.debug(f"Record validated successfully: uid={record_dict.get('uid')}")
 
-            # Обогащаем запись (форматирование дат, добавление timestamp, обрезание, хэш)
+            # Обогащаем запись
             enriched = self.enricher.enrich_record(record_dict)
-            logger.debug(f"Record enriched: uid={enriched.get('uid')}, ts={enriched.get('ts')}")
 
-            # Разбиваем birthday (если настроено)
+            # Разбиваем birthday
             processed = self.enricher.process_with_birthday_split(enriched)
 
             self.processed_count += 1
-            if self.processed_count % 100 == 0:  # Логируем каждые 100 записей
+            if self.processed_count % 100 == 0:
                 elapsed = time.time() - self.start_time
                 logger.info(
-                    f"Processed {self.processed_count} records, "
-                    f"errors: {self.error_count}, "
-                    f"rate: {self.processed_count/elapsed:.2f} rec/sec"
+                    f'Processed {self.processed_count} records, '
+                    f'errors: {self.error_count}, '
+                    f'rate: {self.processed_count/elapsed:.2f} rec/sec'
                 )
 
             return processed
 
         except Exception as e:
             self.error_count += 1
-            logger.error(f'Error processing record: {e}, record: {record}', exc_info=True)
+            logger.error(f'Error processing record: {e}', exc_info=True)
             return None
 
     def process_batch(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        '''
-        Обрабатывает батч записей
-        '''
+        '''Обрабатывает батч записей'''
         batch_start = time.time()
-        logger.info(f"Processing batch of {len(records)} records")
+        logger.info(f'Processing batch of {len(records)} records')
 
         processed_records = []
-        for idx, record in enumerate(records):
+        for record in records:
             processed = self.process_record(record)
             if processed:
                 processed_records.append(processed)
 
         batch_time = time.time() - batch_start
-        logger.info(
-            f"Batch processed: {len(processed_records)}/{len(records)} records, "
-            f"time: {batch_time:.2f}s, "
-            f"rate: {len(records)/batch_time:.2f} rec/sec"
-        )
+        logger.info(f'Batch processed: {len(processed_records)}/{len(records)} records, ' f'time: {batch_time:.2f}s')
 
         return processed_records
 
