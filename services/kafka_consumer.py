@@ -39,21 +39,37 @@ class KafkaConsumerService:
             settings.topic,  # Топик для подписки
             group_id=settings.kafka.group_id,  # Group ID
             auto_offset_reset='earliest',  # Auto Offset Reset = earliest
-            auto_commit_interval_ms=1000,  # Max Uncommitted Time = 1 sec
+            # auto_commit_interval_ms=1000,      # Max Uncommitted Time = 1 sec (если нужно)
         )
         async def handle_message(message: Dict[str, Any]):
+            '''Обработчик сообщений из Kafka'''
             try:
+                # Логируем полученное сообщение
+                uid = message.get('uid') if isinstance(message, dict) else None
+                logger.debug(f'Received message from Kafka: uid={uid}')
+
                 await self.message_handler(message)
+                logger.debug(f'Message processed successfully: uid={uid}')
+
             except Exception as e:
-                logger.error(f'Error handling message: {e}')
+                logger.error(f'Error handling message: {e}', exc_info=True)
                 raise
 
     async def start(self):
         '''Запускает консьюмер'''
-        logger.info(f'Starting Kafka consumer for topics: {settings.topic}')
-        await self.broker.start()
+        try:
+            logger.info(f'Starting Kafka consumer for topics: {settings.topic}')
+            logger.info(f'Kafka broker: {settings.kafka.dsn.host}:{settings.kafka.dsn.port}')
+            logger.info(f'Group ID: {settings.kafka.group_id}')
+            await self.broker.start()
+        except Exception as e:
+            logger.error(f'Failed to start Kafka consumer: {e}')
+            raise
 
     async def stop(self):
         '''Останавливает консьюмер'''
-        logger.info('Stopping Kafka consumer...')
-        await self.broker.close()
+        try:
+            logger.info('Stopping Kafka consumer...')
+            await self.broker.close()
+        except Exception as e:
+            logger.error(f'Error stopping Kafka consumer: {e}')

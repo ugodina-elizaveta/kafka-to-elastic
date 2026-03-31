@@ -30,12 +30,23 @@ class RecordMerger:
         self.bin_timestamps: list[float] = []
         self._lock = asyncio.Lock()
 
+        # Статистика
+        self.total_records_added = 0
+        self.total_batches_created = 0
+        self.batches_by_size = {}
+        self.batches_by_reason = {'size': 0, 'timeout': 0}
+
         self._init_bins()
+        logger.info(
+            f"RecordMerger initialized: min_records={min_records}, "
+            f"max_records={max_records}, max_bin_age={max_bin_age}s, max_bins={max_bins}"
+        )
 
     def _init_bins(self):
         '''Инициализирует бины'''
         self.bins = [deque() for _ in range(self.max_bins)]
         self.bin_timestamps = [time.time() for _ in range(self.max_bins)]
+        logger.debug(f"Initialized {self.max_bins} bins")
 
     def _get_best_bin(self) -> int:
         '''Находит бин с наименьшим количеством записей (Bin-Packing Algorithm)'''
@@ -47,6 +58,7 @@ class RecordMerger:
                 min_size = len(bin_queue)
                 best_bin = i
 
+        logger.debug(f"Selected bin {best_bin} with {min_size} records")
         return best_bin
 
     async def add_record(self, record: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
@@ -55,13 +67,25 @@ class RecordMerger:
         Возвращает батч, если бин заполнен до max_records
         '''
         async with self._lock:
+            self.total_records_added += 1
             bin_idx = self._get_best_bin()
             self.bins[bin_idx].append(record)
+            current_size = len(self.bins[bin_idx])
 
-            if len(self.bins[bin_idx]) >= self.max_records:
+            logger.debug(f"Added record to bin {bin_idx}, size={current_size}")
+
+            if current_size >= self.max_records:
+                # Бин заполнен
                 batch = list(self.bins[bin_idx])
+                batch_size = len(batch)
                 self.bins[bin_idx].clear()
                 self.bin_timestamps[bin_idx] = time.time()
+
+                self.total_batches_created += 1
+                self.batches_by_size[batch_size] = self.batches_by_size.get(batch_size, 0) + 1
+                self.batches_by_reason['size'] += 1
+
+                logger.info(f"Created batch of {batch_size} records (max size reached) from bin {bin_idx}")
                 return batch
 
             return None
@@ -77,15 +101,44 @@ class RecordMerger:
             current_time = time.time()
 
             for i, bin_queue in enumerate(self.bins):
-                if len(bin_queue) >= self.min_records:
+                bin_size = len(bin_queue)
+                if bin_size == 0:
+                    continue
+
+                bin_age = current_time - self.bin_timestamps[i]
+                reason = None
+
+                if bin_size >= self.min_records:
                     # Достигнут минимум записей
+                    reason = f"min_records reached ({bin_size} >= {self.min_records})"
                     batches.append(list(bin_queue))
                     bin_queue.clear()
                     self.bin_timestamps[i] = current_time
-                elif len(bin_queue) > 0 and (current_time - self.bin_timestamps[i]) >= self.max_bin_age:
+                    self.batches_by_reason['size'] += 1
+
+                elif bin_age >= self.max_bin_age:
                     # Истекло время ожидания
+                    reason = f"timeout reached ({bin_age:.1f}s >= {self.max_bin_age}s)"
                     batches.append(list(bin_queue))
                     bin_queue.clear()
                     self.bin_timestamps[i] = current_time
+                    self.batches_by_reason['timeout'] += 1
+
+                if reason:
+                    self.total_batches_created += 1
+                    self.batches_by_size[bin_size] = self.batches_by_size.get(bin_size, 0) + 1
+                    logger.info(f"Created batch of {bin_size} records from bin {i}: {reason}")
 
             return batches
+
+    def get_stats(self) -> dict[str, Any]:
+        '''Возвращает статистику мерджера'''
+        current_sizes = [len(b) for b in self.bins]
+        return {
+            'total_records_added': self.total_records_added,
+            'total_batches_created': self.total_batches_created,
+            'batches_by_size': self.batches_by_size,
+            'batches_by_reason': self.batches_by_reason,
+            'current_bin_sizes': current_sizes,
+            'current_total_records': sum(current_sizes),
+        }
